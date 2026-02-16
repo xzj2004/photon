@@ -32,3 +32,4 @@
 *.app
 
 .DS_Store
+photon/cpptools-linux-x64.vsix

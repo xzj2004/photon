@@ -12,7 +12,6 @@ MPL v2
 #else
   #include <Arduino.h>
   #include <HardwareSerial.h>
-  #include <OneWire.h>
   #include <ArduinoUniqueID.h>
   #include <rs485/rs485bus.hpp>
 #endif // UNIT_TEST
@@ -49,9 +48,8 @@ StreamFake ser();
 HardwareSerial ser(PA10, PA9);
 #endif // ARDUINO
 
-// EEPROM
-OneWire oneWire(ONE_WIRE);
-FeederFloor feederFloor(&oneWire);
+// Flash Storage
+FeederFloor feederFloor;
 
 // RS485
 HardwareSerialBusIO busIO(&ser);
@@ -104,10 +102,7 @@ void setup() {
 
   byte addr = feederFloor.read_floor_address();
 
-  if(addr == 0xFF){ // not detected, turn red
-    feeder->set_rgb(true, false, false);
-  }
-  else if (addr == 0x00){ //not programmed, turn blue
+  if (addr == 0x00){ // not programmed, turn blue
     feeder->set_rgb(false, false, true);
   }
 

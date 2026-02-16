@@ -1,160 +1,132 @@
 #include "FeederFloor.h"
 
-FeederFloor::FeederFloor(OneWire* oneWire) : _oneWire(oneWire) {
+// STM32F0 Flash 寄存器定义
+#define FLASH_BASE_ADDR      ((uint32_t)0x40022000)
+#define FLASH_ACR            (*(volatile uint32_t*)(FLASH_BASE_ADDR + 0x00))
+#define FLASH_KEYR           (*(volatile uint32_t*)(FLASH_BASE_ADDR + 0x04))
+#define FLASH_SR             (*(volatile uint32_t*)(FLASH_BASE_ADDR + 0x0C))
+#define FLASH_CR             (*(volatile uint32_t*)(FLASH_BASE_ADDR + 0x10))
+#define FLASH_AR             (*(volatile uint32_t*)(FLASH_BASE_ADDR + 0x14))
 
+// FLASH_SR 位定义
+#define FLASH_SR_BSY         (1 << 0)
+#define FLASH_SR_EOP         (1 << 5)
+
+// FLASH_CR 位定义
+#define FLASH_CR_PG          (1 << 0)
+#define FLASH_CR_PER         (1 << 1)
+#define FLASH_CR_STRT        (1 << 6)
+#define FLASH_CR_LOCK        (1 << 7)
+
+// Flash 解锁密钥
+#define FLASH_KEY1           ((uint32_t)0x45670123)
+#define FLASH_KEY2           ((uint32_t)0xCDEF89AB)
+
+FeederFloor::FeederFloor() {
+}
+
+void FeederFloor::flash_unlock() {
+    if (FLASH_CR & FLASH_CR_LOCK) {
+        FLASH_KEYR = FLASH_KEY1;
+        FLASH_KEYR = FLASH_KEY2;
+    }
+}
+
+void FeederFloor::flash_lock() {
+    FLASH_CR |= FLASH_CR_LOCK;
+}
+
+bool FeederFloor::flash_erase_page(uint32_t page_addr) {
+    // 等待之前的操作完成
+    while (FLASH_SR & FLASH_SR_BSY);
+    
+    // 设置页擦除
+    FLASH_CR |= FLASH_CR_PER;
+    FLASH_AR = page_addr;
+    FLASH_CR |= FLASH_CR_STRT;
+    
+    // 等待擦除完成
+    while (FLASH_SR & FLASH_SR_BSY);
+    
+    // 清除 PER 位
+    FLASH_CR &= ~FLASH_CR_PER;
+    
+    // 检查擦除是否成功 (读取地址应该为 0xFFFF)
+    return (*(volatile uint16_t*)page_addr == 0xFFFF);
+}
+
+bool FeederFloor::flash_write_halfword(uint32_t addr, uint16_t data) {
+    // 等待之前的操作完成
+    while (FLASH_SR & FLASH_SR_BSY);
+    
+    // 设置编程位
+    FLASH_CR |= FLASH_CR_PG;
+    
+    // 写入半字
+    *(volatile uint16_t*)addr = data;
+    
+    // 等待写入完成
+    while (FLASH_SR & FLASH_SR_BSY);
+    
+    // 清除 PG 位
+    FLASH_CR &= ~FLASH_CR_PG;
+    
+    // 验证写入
+    return (*(volatile uint16_t*)addr == data);
 }
 
 uint8_t FeederFloor::read_floor_address() {
-  // reset the 1-wire line, and return false if no chip detected
-  if(!_oneWire->reset()) {
-    return 0xFF;
-  }
-
-  // Send 0x3C to indicate skipping the ROM selection step; there'll only ever be one ROM on the bus
-  _oneWire->skip();
-
-  // array with the commands to initiate a read, DS28E07 device expect 3 bytes to start a read: command,LSB&MSB adresses
-  uint8_t leemem[3] = {
-    0xF0,
-    0x00,
-    0x00
-  };
-
-  // sending those three bytes
-  _oneWire->write_bytes(leemem, sizeof(leemem), 1);
-
-  uint8_t addr = _oneWire->read();  // Start by reading our address byte
-
-  // Read the next 31 bytes, discarding their value. Each page is 32 bytes so we need 32 read commands
-  for (uint8_t i = 0; i < 31; i++) {
-    _oneWire->read();
-  }
-
-  // return the first byte from returned data
-  return addr;
+    // 读取 magic 值
+    uint16_t magic = *(volatile uint16_t*)FLASH_STORAGE_PAGE_ADDR;
+    
+    // 检查 magic 是否正确
+    if (magic != FLASH_DATA_MAGIC) {
+        // Flash 未初始化或数据无效
+        // 0x00 表示未编程
+        return 0x00;
+    }
+    
+    // 读取地址值 (存储在 magic 之后)
+    uint16_t addr_data = *(volatile uint16_t*)(FLASH_STORAGE_PAGE_ADDR + 2);
+    
+    return (uint8_t)(addr_data & 0xFF);
 }
 
 bool FeederFloor::write_floor_address(uint8_t address) {
-/*
-    wriıte_floor_address()
-      success returns programmed address byte
-      failure returns 0xFF
-
-This function takes a byte as in input, and flashes it to address 0x0000 in the eeprom (where the floor ID is stored).
-The DS28E07 requires a million and one steps to make this happen. Reference the datasheet for details:
-https://datasheets.maximintegrated.com/en/ds/DS28E07.pdf
-*/
-
-
-  byte i;                         // This is for the for loops
-  //-----
-  // Write To Scratchpad
-  //-----
-
-  byte data[8] = {address, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-
-  // reset the 1-wire line, and return false if no chip detected
-  if(!_oneWire->reset()){
-    return false;
-  }
-
-  // Send 0x3C to indicate skipping the ROM selection step; there'll only ever be one ROM on the bus
-  _oneWire->skip();
-
-  // array with the commands to initiate a write to the scratchpad, DS28E07 device expect 3 bytes to start a read: command,LSB&MSB adresses
-  byte leemem[3] = {
-    0x0F,
-    0x00,
-    0x00
-  };
-
-  // sending those three bytes
-  _oneWire->write_bytes(leemem, sizeof(leemem), 1);
-
-  // Now it's time to actually write the data to the scratchpad
-  for ( i = 0; i < 8; i++) {
-    _oneWire->write(data[i], 1);
-  }
-
-  // read back the CRC
-  //byte ccrc = _oneWire->read();
-
-  //-----
-  // Read Scratchpad
-  //-----
-
-  // reset the 1-wire line, and return failure if no chip detected
-  if(!_oneWire->reset()){
-    return false;
-  }
-
-  // Send 0x3C to indicate skipping the ROM selection step; there'll only ever be one ROM on the bus
-  _oneWire->skip();
-
-  // send read scratchpad command
-  _oneWire->write(0xAA, 1);
-
-  // array for the data we'll read back
-  byte read_data[11];
-
-  //read in TA1, TA2, and E/S bytes, then the 8 bytes of data
-  for ( i = 0; i < sizeof(read_data); i++) {
-    read_data[i] = _oneWire->read();
-  }
-
-#if 0  // TODO we should probably be checking the CRC
-  // byte for the ccrc the eeprom will send us
-  byte scratchpad_ccrc = _oneWire->read();
-
-  byte ccrc_calc = OneWire::crc8(read_data, sizeof(read_data));
-
-  // TODO need to be checking CCRC. never returns true, even when data is identical.
-  // if(scratchpad_ccrc != ccrc_calc){
-  //   // do nothing
-  // }
-#endif
-
-  //-----
-  // Copy Scratchpad to Memory
-  //-----
-
-  // reset the 1-wire line, and return false if no chip detected
-  if(!_oneWire->reset()){
-    return false;
-  }
-
-  // Send 0x3C to indicate skipping the ROM selection step; there'll only ever be one ROM on the bus
-  _oneWire->skip();
-
-  // copy scratchpad command
-  _oneWire->write(0x55, 1);
-
-  // sending auth bytes from scratchpad read, which is the first 3 bytes
-  _oneWire->write_bytes(read_data, 3, 1);
-
-  // wait for programming, we'll get alternating 1s and 0s when done
-  uint32_t timer = millis();
-  while(true){
-    if(_oneWire->read() == 0xAA){
-      break;
+    // 禁用中断以确保原子操作
+    __disable_irq();
+    
+    // 解锁 Flash
+    flash_unlock();
+    
+    // 擦除页
+    if (!flash_erase_page(FLASH_STORAGE_PAGE_ADDR)) {
+        flash_lock();
+        __enable_irq();
+        return false;
     }
-    if( (millis() - timer) > 20 ){ // datasheet says it should only ever take 12ms at most to program
-      break;
+    
+    // 写入 magic
+    if (!flash_write_halfword(FLASH_STORAGE_PAGE_ADDR, FLASH_DATA_MAGIC)) {
+        flash_lock();
+        __enable_irq();
+        return false;
     }
-  }
-
-  // send reset
-  if(!_oneWire->reset()){
-    return false;
-  }
-
-  // check the floor address by reading
-  byte written_address = this->read_floor_address();
-
-  if(written_address == address) {
-    //return new address
-    return true;
-  }
-
-  return false;
+    
+    // 写入地址 (作为半字，高字节为 0xFF 作为校验)
+    uint16_t addr_data = 0xFF00 | address;
+    if (!flash_write_halfword(FLASH_STORAGE_PAGE_ADDR + 2, addr_data)) {
+        flash_lock();
+        __enable_irq();
+        return false;
+    }
+    
+    // 锁定 Flash
+    flash_lock();
+    
+    // 恢复中断
+    __enable_irq();
+    
+    // 验证写入
+    return (read_floor_address() == address);
 }
